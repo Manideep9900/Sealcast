@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Sealcast</title>
+  <!-- Pinned versions: unpinned CDN URLs can break without warning -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+  <style>
+    html, body { margin: 0; height: 100%; background: radial-gradient(ellipse at center, #14213d, #02030a); overflow: hidden; font-family: system-ui, sans-serif; }
+    .layer { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: cover; transform: scaleX(-1); }
+    #cam { z-index: 0; }
+    #skeleton { z-index: 2; pointer-events: none; }
+    .vignette { position: fixed; inset: 0; background: radial-gradient(ellipse at center, transparent 35%, rgba(0,0,0,.55) 100%); pointer-events: none; z-index: 4; }
+    .rasengan { position: fixed; top: 0; left: 0; height: auto; transform: translate(-50%, -50%); pointer-events: none;
+      mix-blend-mode: screen; opacity: 0; will-change: opacity, left, top, width; z-index: 10; }
+    #hint { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); color: #cfe9ff; font-size: 14px;
+      letter-spacing: .04em; background: rgba(0,0,0,.5); padding: 6px 14px; border-radius: 999px; z-index: 12; pointer-events: none; text-align: center; max-width: 90vw; }
+    #fx { z-index: 9; transform: none; pointer-events: none; }
+    #bar { position: fixed; top: calc(12px + env(safe-area-inset-top, 0px)); right: 12px; display: flex; gap: 8px; z-index: 12; }
+    button { font: inherit; cursor: pointer; color: #e8f4ff; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.25); border-radius: 10px; padding: 8px 12px; }
+    button:hover { background: rgba(40,80,140,.7); }
+    #start { position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: rgba(2,3,10,.85); color: #cfe9ff; text-align: center; padding: 20px; }
+    #start button { font-size: 18px; padding: 12px 22px; }
+    #start .alt { font-size: 14px; opacity: .8; }
+  </style>
+</head>
+<body>
+  <video id="cam" class="layer" autoplay playsinline muted></video>
+  <canvas id="skeleton" class="layer"></canvas>
+  <canvas id="fx" class="layer"></canvas>
+  <div class="vignette"></div>
+  <video class="rasengan" src="assets/rasengan.mp4" muted loop playsinline preload="auto"></video>
+  <video class="rasengan" src="assets/rasengan.mp4" muted loop playsinline preload="auto"></video>
+  <div id="hint">Starting…</div>
+  <div id="bar">
+    <button id="bMute" title="Sound on/off (M)">🔊</button><button id="bShot" title="Screenshot (S)">📸</button>
+    <button id="bRec" title="Record video (R)">⏺</button><button id="bFull" title="Fullscreen (F)">⛶</button>
+  </div>
+  <div id="start">
+    <h2 style="margin:0">🌀Sealcast</h2>
+    <p id="msg" style="margin:0;max-width:380px">Open palm = Rasengan · ✌️ = Chidori · ✊ = Fire Style</p>
+    <button id="go">📷 Use camera</button>
+    <button id="demo" class="alt">Try demo (no camera)</button>
+  </div>
+
+  <script>
+    const camVideo = document.getElementById('cam');
+    const canvas = document.getElementById('skeleton');
+    const pen = canvas.getContext('2d');
+    const orbs = [...document.querySelectorAll('.rasengan')];
+    const hint = document.getElementById('hint');
+    // Tell the user if the rasengan clip can't be loaded (wrong path / missing assets folder)
+    orbs.forEach(o => o.addEventListener('error', () => {
+      hint.textContent = '⚠️ Cannot load ' + o.getAttribute('src') + ' — keep the assets folder next to this HTML file';
+      hint.style.color = '#ffb4a8';
+    }));
+
+    const PALETTES = {
+      Left:  { bone: '#ff8a3d', joint: '#fff36a', glow: '#ff5e1a' },
+      Right: { bone: '#62f0ff', joint: '#ff66e0', glow: '#1aa6ff' }
+    };
+    // Own hand topology so drawing never depends on a CDN script
+    const LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+    const TIPS = [8, 12, 16, 20], KNUCKLES = [6, 10, 14, 18];
+    const CHARGE_UP = 0.06, CHARGE_DOWN = 0.18, SMOOTH = 0.35;
+
+    // Per-slot state: charge, open flag (with hysteresis), smoothed position/size
+    const state = [0, 1].map(() => ({ charge: 0, open: false, x: 0, y: 0, w: 600, init: false }));
+
+    // Source frame size; the camera frame (or window in demo mode) is "cover"-fitted to the screen
+    let view = { w: 1280, h: 720 };
+
+    function countExtended(lm) {
+      const wr = lm[0];
+      let n = 0;
+      for (let i = 0; i < 4; i++) {
+        const t = lm[TIPS[i]], k = lm[KNUCKLES[i]];
+        if (Math.hypot(t.x - wr.x, t.y - wr.y) > Math.hypot(k.x - wr.x, k.y - wr.y)) n++;
+      }
+      return n;
+    }
+
+    // Hysteresis: opens at >=3 fingers, closes at <=1 -> no flicker at the threshold
+    function nextOpen(prev, lm) {
+      const n = countExtended(lm);
+      return n >= 3 ? true : n <= 1 ? false : prev;
+    }
+
+    // Map normalized landmark -> screen px, honouring object-fit: cover and the CSS mirror
+    function toScreen(p) {
+      const W = innerWidth, H = innerHeight;
+      const s = Math.max(W / view.w, H / view.h);
+      const dw = view.w * s, dh = view.h * s;
+      return { x: W - (p.x * dw + (W - dw) / 2), y: p.y * dh + (H - dh) / 2, scale: s };
+    }
+
+    function paintSkeleton(lm, c) {
+      pen.save(); pen.shadowBlur = 18; pen.shadowColor = c.glow;
+      pen.strokeStyle = c.bone; pen.lineWidth = 3; pen.lineCap = 'round'; pen.beginPath();
+      for (const [a, b] of LINKS) { pen.moveTo(lm[a].x * canvas.width, lm[a].y * canvas.height); pen.lineTo(lm[b].x * canvas.width, lm[b].y * canvas.height); }
+      pen.stroke();
+      pen.restore();
+      pen.save(); pen.shadowBlur = 10; pen.shadowColor = c.glow; pen.fillStyle = c.joint;
+      for (const p of lm) { pen.beginPath(); pen.arc(p.x * canvas.width, p.y * canvas.height, 3.5, 0, 6.2832); pen.fill(); }
+      pen.restore();
+    }
+
+    function placeOrb(slot, lm) {
+      const st = state[slot], o = orbs[slot];
+      const wr = toScreen(lm[0]), mk = toScreen(lm[9]);
+      const handPx = Math.hypot(mk.x - wr.x, mk.y - wr.y);
+      const tx = (wr.x + mk.x) / 2, ty = (wr.y + mk.y) / 2 - handPx * 1.8;
+      const tw = Math.min(1600, Math.max(400, handPx * 12));   // orb scales with hand size
+      if (!st.init) { st.x = tx; st.y = ty; st.w = tw; st.init = true; }
+      st.x += (tx - st.x) * SMOOTH; st.y += (ty - st.y) * SMOOTH; st.w += (tw - st.w) * SMOOTH;
+      o.style.left = st.x + 'px'; o.style.top = st.y + 'px';
+      o.style.width = st.w + 'px'; o.style.opacity = st.charge.toFixed(3);
+    }
+
+    function fade(slot) {
+      const st = state[slot];
+      st.charge = Math.max(0, st.charge - CHARGE_DOWN);
+      st.open = false; st.init = false; st.on = false;
+      orbs[slot].style.opacity = st.charge.toFixed(3);
+      if (st.charge === 0) orbs[slot].pause();
+    }
+
+    // finger extended flags: index, middle, ring, pinky
+    function fingers(lm) {
+      const wr = lm[0];
+      return TIPS.map((t, i) => Math.hypot(lm[t].x - wr.x, lm[t].y - wr.y) > Math.hypot(lm[KNUCKLES[i]].x - wr.x, lm[KNUCKLES[i]].y - wr.y));
+    }
+
+    // hands: [{ lm, label }]
+    function process(hands) {
+      if (canvas.width !== view.w || canvas.height !== view.h) { canvas.width = view.w; canvas.height = view.h; }
+      if (fx.width !== innerWidth || fx.height !== innerHeight) { fx.width = innerWidth; fx.height = innerHeight; }
+      pen.clearRect(0, 0, canvas.width, canvas.height);
+      const seen = [false, false], act = [];
+      for (const { lm, label } of hands.slice(0, 2)) {
+        let slot = label === 'Right' ? 1 : 0;
+        if (seen[slot]) slot = 1 - slot;
+        seen[slot] = true;
+        paintSkeleton(lm, PALETTES[slot ? 'Right' : 'Left']);
+
+        const st = state[slot], e = fingers(lm), n = e.filter(Boolean).length;
+        st.open = n >= 3 ? true : n <= 1 ? false : st.open;      // hysteresis
+        const g = e[0] && e[1] && !e[2] && !e[3] ? 'peace' : st.open ? 'open' : n === 0 ? 'fist' : '';
+        if (g !== st.g && g) sfx.whoosh(g);
+        st.g = g;
+        const on = g === 'open';
+        st.charge = Math.max(0, Math.min(1, st.charge + (on ? CHARGE_UP : -CHARGE_DOWN)));
+        if (on && !st.on) { orbs[slot].currentTime = 0; orbs[slot].play().catch(() => {}); }
+        st.on = on;
+        if (st.charge > 0.01) placeOrb(slot, lm); else { orbs[slot].style.opacity = 0; st.init = false; }
+        const wr = toScreen(lm[0]), mk = toScreen(lm[9]);
+        act.push({ g, x: (wr.x + mk.x) / 2, y: (wr.y + mk.y) / 2, r: Math.hypot(mk.x - wr.x, mk.y - wr.y) });
+      }
+      for (let i = 0; i < 2; i++) if (!seen[i]) { fade(i); state[i].g = ''; }
+      drawFx(act);
+      sfx.level(Math.max(state[0].charge, state[1].charge));
+      const cur = state.map(x => x.g).find(Boolean);
+      if (cur !== lastG) { lastG = cur; if (ready) hint.textContent = NAMES[cur] || def; }
+    }
+
+    // ---------- Camera / MediaPipe mode ----------
+    function startCamera() {
+      const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+      hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.65, minTrackingConfidence: 0.65 });
+      let first = true;
+      hands.onResults(res => {
+        if (first) { first = false; ready = true; hint.textContent = def; }
+        if (camVideo.videoWidth) view = { w: camVideo.videoWidth, h: camVideo.videoHeight };
+        const list = (res.multiHandLandmarks || []).map((lm, i) => ({ lm, label: res.multiHandedness[i].label }));
+        process(list);
+      });
+      hint.textContent = 'Loading hand model…';
+      new Camera(camVideo, { onFrame: () => hands.send({ image: camVideo }), width: 1280, height: 720 })
+        .start().catch(err => { console.warn(err); showStart('Camera blocked or busy. Allow access (lock icon in the address bar) and try again.'); });
+    }
+
+    // ---------- Demo mode: a synthetic hand follows the pointer ----------
+    function makeHand(cx, cy, s, open, peace) {          // normalized coords, 21 landmarks
+      const lm = new Array(21), P = (x, y) => ({ x: cx + x * s * (view.h / view.w), y: cy + y * s, z: 0 });
+      lm[0] = P(0, 0);
+      const bases = [[-0.3, -0.15], [-0.2, -0.6], [0, -0.66], [0.2, -0.6], [0.36, -0.5]];
+      const lean  = [-0.55, -0.12, 0, 0.12, 0.24];
+      bases.forEach(([bx, by], f) => {
+        const i0 = f === 0 ? 1 : 1 + f * 4;
+        for (let j = 0; j < 4; j++) {
+          const len = j * 0.2;
+          const ox = bx + Math.sin(lean[f]) * len, oy = by - Math.cos(lean[f]) * len;
+          const cxj = bx + (j ? 0.03 * f : 0), cyj = by + (j ? -0.05 + 0.1 * (j - 1) : 0);
+          const p = open || f === 0 || (peace && (f === 1 || f === 2)) ? [ox, oy] : [cxj, cyj];
+          lm[i0 + j] = P(p[0], p[1]);
+        }
+      });
+      return lm;
+    }
+
+    function startDemo() {
+      if (demoMode) return;
+      demoMode = true; start.style.display = 'none';
+      def = 'Demo: move the pointer · click cycles ✋ open / ✌️ peace / ✊ fist'; hint.textContent = def; ready = true;
+      view = { w: innerWidth, h: innerHeight };
+      let px = 0.5, py = 0.65, mode = 0;
+      addEventListener('pointermove', e => { px = 1 - e.clientX / innerWidth; py = e.clientY / innerHeight; });
+      addEventListener('pointerdown', e => { sfx.init(); if (!e.target.closest('#bar,#start')) mode = (mode + 1) % 3; });
+      addEventListener('resize', () => { view = { w: innerWidth, h: innerHeight }; });
+      (function loop() {
+        process([{ lm: makeHand(px, Math.min(py + 0.2, 0.95), 0.32, mode === 0, mode === 1), label: 'Left' }]);
+        requestAnimationFrame(loop);
+      })();
+    }
+
+    // ---------- UI state ----------
+    const $ = id => document.getElementById(id);
+    const start = $('start'), fx = $('fx'), fxc = fx.getContext('2d');
+    const NAMES = { open: '🌀 Rasengan', peace: '⚡ Chidori', fist: '🔥 Fire Style' };
+    let def = 'Open palm 🌀 · ✌️ Chidori ⚡ · ✊ Fire Style 🔥', ready = false, lastG, demoMode = false;
+    state.forEach(x => { x.g = ''; x.on = false; });
+    function showStart(msg) { ready = false; start.style.display = 'flex'; $('msg').textContent = msg; }
+
+    // ---------- Jutsu effects (procedural, no assets) ----------
+    const parts = [], rnd = (a, b) => a + Math.random() * (b - a);
+    function drawFx(act) {
+      fxc.clearRect(0, 0, fx.width, fx.height);
+      fxc.globalCompositeOperation = 'lighter'; fxc.lineCap = 'round'; fxc.lineJoin = 'round';
+      for (const a of act) {
+        if (a.g === 'peace') chidori(a.x, a.y - a.r * 0.9, a.r);
+        else if (a.g === 'fist') for (let i = 0; i < 5; i++)
+          parts.push({ x: a.x + rnd(-1, 1) * a.r * 0.5, y: a.y - a.r * 0.4, vx: rnd(-1, 1), vy: rnd(-4, -1.5), l: 1, r: a.r * rnd(0.15, 0.4) });
+      }
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const q = parts[i]; q.x += q.vx; q.y += q.vy; q.l -= 0.03;
+        if (q.l <= 0) { parts.splice(i, 1); continue; }
+        const g = fxc.createRadialGradient(q.x, q.y, 0, q.x, q.y, q.r);
+        g.addColorStop(0, `rgba(255,${Math.round(220 * q.l)},80,${q.l})`); g.addColorStop(1, 'rgba(255,60,0,0)');
+        fxc.fillStyle = g; fxc.beginPath(); fxc.arc(q.x, q.y, q.r, 0, 6.2832); fxc.fill();
+      }
+      fxc.globalCompositeOperation = 'source-over';
+    }
+    function chidori(cx, cy, r) {
+      const g = fxc.createRadialGradient(cx, cy, 0, cx, cy, r * 1.6);
+      g.addColorStop(0, 'rgba(210,240,255,.9)'); g.addColorStop(0.35, 'rgba(70,160,255,.45)'); g.addColorStop(1, 'rgba(0,60,255,0)');
+      fxc.fillStyle = g; fxc.beginPath(); fxc.arc(cx, cy, r * 1.6, 0, 6.2832); fxc.fill();
+      fxc.strokeStyle = '#d8f2ff'; fxc.shadowColor = '#4fb3ff'; fxc.shadowBlur = 18;
+      for (let b = 0; b < 9; b++) {
+        const ang = rnd(0, 6.2832), len = r * rnd(0.9, 2.2);
+        fxc.lineWidth = rnd(1.5, 3.5); fxc.beginPath(); fxc.moveTo(cx, cy);
+        for (let k = 1; k <= 8; k++) {
+          const d = len * k / 8, j = rnd(-1, 1) * r * 0.18;
+          fxc.lineTo(cx + Math.cos(ang) * d - Math.sin(ang) * j, cy + Math.sin(ang) * d + Math.cos(ang) * j);
+        }
+        fxc.stroke();
+      }
+      fxc.shadowBlur = 0;
+    }
+
+    // ---------- Sound (synthesised with WebAudio, no files) ----------
+    const sfx = {
+      ctx: null, hum: null, muted: false,
+      init() {
+        if (this.ctx) return;
+        try {
+          const C = this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const o = C.createOscillator(), f = C.createBiquadFilter(), g = C.createGain();
+          o.type = 'sawtooth'; o.frequency.value = 70; f.type = 'lowpass'; f.frequency.value = 380; g.gain.value = 0;
+          o.connect(f); f.connect(g); g.connect(C.destination); o.start(); this.hum = g;
+        } catch (e) { console.warn(e); }
+      },
+      level(v) { if (this.hum) this.hum.gain.setTargetAtTime(this.muted ? 0 : v * 0.1, this.ctx.currentTime, 0.1); },
+      whoosh(kind) {
+        const C = this.ctx; if (!C || this.muted) return;
+        const len = C.sampleRate * 0.7, buf = C.createBuffer(1, len, C.sampleRate), d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+        const src = C.createBufferSource(), bp = C.createBiquadFilter(), g = C.createGain(), t = C.currentTime;
+        const hi = kind === 'peace' ? 6000 : kind === 'fist' ? 1200 : 3000;
+        src.buffer = buf; bp.type = 'bandpass'; bp.Q.value = 1.2;
+        bp.frequency.setValueAtTime(200, t); bp.frequency.exponentialRampToValueAtTime(hi, t + 0.5);
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.35, t + 0.25); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
+        src.connect(bp); bp.connect(g); g.connect(C.destination); src.start(t);
+      }
+    };
+
+    // ---------- Screenshot / recording (composites camera + skeleton + fx + orbs) ----------
+    function compose(x, W, H) {
+      x.fillStyle = '#02030a'; x.fillRect(0, 0, W, H);
+      const mir = (src, sw, sh) => {
+        if (!sw || !sh) return;
+        const s = Math.max(W / sw, H / sh), dw = sw * s, dh = sh * s;
+        x.save(); x.translate(W, 0); x.scale(-1, 1); x.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh); x.restore();
+      };
+      if (!demoMode) mir(camVideo, camVideo.videoWidth, camVideo.videoHeight);
+      mir(canvas, canvas.width, canvas.height);
+      x.drawImage(fx, 0, 0, W, H);
+      x.globalCompositeOperation = 'screen';
+      for (const o of orbs) {
+        const op = +o.style.opacity;
+        if (op > 0.01 && o.readyState > 1) {
+          const w = parseFloat(o.style.width), h = w * o.videoHeight / o.videoWidth;
+          x.globalAlpha = op; x.drawImage(o, parseFloat(o.style.left) - w / 2, parseFloat(o.style.top) - h / 2, w, h);
+        }
+      }
+      x.globalAlpha = 1; x.globalCompositeOperation = 'source-over';
+    }
+    function save(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }
+    function shot() {
+      const c = document.createElement('canvas'); c.width = innerWidth; c.height = innerHeight;
+      compose(c.getContext('2d'), c.width, c.height); c.toBlob(b => save(b, 'rasengan.png'));
+    }
+    let rec = null;
+    function toggleRec() {
+      if (rec) { rec.stop(); return; }
+      if (!window.MediaRecorder) { hint.textContent = 'Recording is not supported in this browser'; return; }
+      const c = document.createElement('canvas'); c.width = innerWidth; c.height = innerHeight;
+      const x = c.getContext('2d'), chunks = [], mt = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+      const r = rec = new MediaRecorder(c.captureStream(30), { mimeType: mt });
+      r.ondataavailable = e => e.data.size && chunks.push(e.data);
+      r.onstop = () => { save(new Blob(chunks, { type: 'video/webm' }), 'rasengan.webm'); rec = null; $('bRec').textContent = '⏺'; };
+      r.start(); $('bRec').textContent = '⏹';
+      (function f() { if (!rec) return; compose(x, c.width, c.height); requestAnimationFrame(f); })();
+    }
+    function toggleMute() { sfx.muted = !sfx.muted; $('bMute').textContent = sfx.muted ? '🔇' : '🔊'; if (sfx.muted) sfx.level(0); }
+    function toggleFull() { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}); }
+
+    $('bMute').onclick = toggleMute; $('bShot').onclick = shot; $('bRec').onclick = toggleRec; $('bFull').onclick = toggleFull;
+    addEventListener('keydown', e => {
+      const k = e.key.toLowerCase();
+      if (k === 'm') toggleMute(); else if (k === 's') shot(); else if (k === 'r') toggleRec(); else if (k === 'f') toggleFull();
+    });
+
+    // ---------- Start ----------
+    $('go').onclick = () => {
+      sfx.init();
+      if (typeof Hands === 'undefined' || !navigator.mediaDevices) { showStart('Could not load MediaPipe or the camera API. Check your internet / ad-blocker, and use http://localhost.'); return; }
+      start.style.display = 'none'; startCamera();
+    };
+    $('demo').onclick = () => { sfx.init(); startDemo(); };
+    if (window.FORCE_DEMO || new URLSearchParams(location.search).has('demo')) startDemo();
+  </script>
+</body>
+</html>
