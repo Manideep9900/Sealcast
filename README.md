@@ -98,7 +98,6 @@ Sealcast/
 
 ## 🙌 Credits
 
-- Concept inspired by [gprem09/naruto](https://github.com/gprem09/naruto)
 - Hand tracking by [MediaPipe](https://google.github.io/mediapipe/) (Google)
 - Rasengan from _Naruto_ by Masashi Kishimoto — clip used here is a third-party asset, swap it before redistributing if you don't have rights
 
