@@ -60,7 +60,7 @@ The palm-open test compares each fingertip's distance to the wrist against the c
 ## 🚀 Setup
 
 ```bash
-git clone https://github.com/strawluck/Sealcast.git
+git clone https://github.com/<you>/Sealcast.git
 cd Sealcast
 python3 -m http.server 8000
 ```
