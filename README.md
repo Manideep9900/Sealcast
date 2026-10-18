@@ -89,7 +89,6 @@ Tunable constants in [`index.html`](index.html):
 Sealcast/
 ├── assets/
 ├── .gitignore
-├── LICENSE
 ├── README.md
 └── index.html
 ```

@@ -34,12 +34,13 @@
   <video class="rasengan" src="assets/rasengan.mp4" muted loop playsinline preload="auto"></video>
   <video class="rasengan" src="assets/rasengan.mp4" muted loop playsinline preload="auto"></video>
   <div id="hint">Starting…</div>
+  <div id="warn" style="display:none;position:fixed;top:12px;left:12px;right:200px;z-index:12;font-size:13px;color:#ffd0c8;background:rgba(80,10,0,.7);padding:6px 12px;border-radius:10px"></div>
   <div id="bar">
     <button id="bMute" title="Sound on/off (M)">🔊</button><button id="bShot" title="Screenshot (S)">📸</button>
     <button id="bRec" title="Record video (R)">⏺</button><button id="bFull" title="Fullscreen (F)">⛶</button>
   </div>
   <div id="start">
-    <h2 style="margin:0">🌀Sealcast</h2>
+    <h2 style="margin:0">🌀 Sealcast</h2>
     <p id="msg" style="margin:0;max-width:380px">Open palm = Rasengan · ✌️ = Chidori · ✊ = Fire Style</p>
     <button id="go">📷 Use camera</button>
     <button id="demo" class="alt">Try demo (no camera)</button>
@@ -53,8 +54,9 @@
     const hint = document.getElementById('hint');
     // Tell the user if the rasengan clip can't be loaded (wrong path / missing assets folder)
     orbs.forEach(o => o.addEventListener('error', () => {
-      hint.textContent = '⚠️ Cannot load ' + o.getAttribute('src') + ' — keep the assets folder next to this HTML file';
-      hint.style.color = '#ffb4a8';
+      o.failed = true;   // the built-in procedural Rasengan takes over
+      const w = document.getElementById('warn');
+      w.style.display = 'block'; w.textContent = '⚠️ rasengan.mp4 not found — using the built-in effect. Put the assets folder next to this HTML file for the real video.';
     }));
 
     const PALETTES = {
@@ -156,7 +158,7 @@
         st.on = on;
         if (st.charge > 0.01) placeOrb(slot, lm); else { orbs[slot].style.opacity = 0; st.init = false; }
         const wr = toScreen(lm[0]), mk = toScreen(lm[9]);
-        act.push({ g, x: (wr.x + mk.x) / 2, y: (wr.y + mk.y) / 2, r: Math.hypot(mk.x - wr.x, mk.y - wr.y) });
+        act.push({ slot, g, x: (wr.x + mk.x) / 2, y: (wr.y + mk.y) / 2, r: Math.hypot(mk.x - wr.x, mk.y - wr.y) });
       }
       for (let i = 0; i < 2; i++) if (!seen[i]) { fade(i); state[i].g = ''; }
       drawFx(act);
@@ -229,7 +231,8 @@
       fxc.clearRect(0, 0, fx.width, fx.height);
       fxc.globalCompositeOperation = 'lighter'; fxc.lineCap = 'round'; fxc.lineJoin = 'round';
       for (const a of act) {
-        if (a.g === 'peace') chidori(a.x, a.y - a.r * 0.9, a.r);
+        if (a.g === 'open' && orbs[a.slot].failed) fallbackOrb(a);
+        else if (a.g === 'peace') chidori(a.x, a.y - a.r * 0.9, a.r);
         else if (a.g === 'fist') for (let i = 0; i < 5; i++)
           parts.push({ x: a.x + rnd(-1, 1) * a.r * 0.5, y: a.y - a.r * 0.4, vx: rnd(-1, 1), vy: rnd(-4, -1.5), l: 1, r: a.r * rnd(0.15, 0.4) });
       }
@@ -241,6 +244,18 @@
         fxc.fillStyle = g; fxc.beginPath(); fxc.arc(q.x, q.y, q.r, 0, 6.2832); fxc.fill();
       }
       fxc.globalCompositeOperation = 'source-over';
+    }
+    function fallbackOrb(a) {      // procedural Rasengan, used only if the video can't load
+      const c = state[a.slot].charge, cx = a.x, cy = a.y - a.r * 1.8, R = a.r * 1.1 * (0.4 + 0.6 * c), t = performance.now() / 1000;
+      const g = fxc.createRadialGradient(cx, cy, 0, cx, cy, R * 1.5);
+      g.addColorStop(0, `rgba(255,255,255,${c})`); g.addColorStop(0.4, `rgba(90,190,255,${0.7 * c})`); g.addColorStop(1, 'rgba(0,80,255,0)');
+      fxc.fillStyle = g; fxc.beginPath(); fxc.arc(cx, cy, R * 1.5, 0, 6.2832); fxc.fill();
+      fxc.lineWidth = 2; fxc.shadowColor = '#4fb3ff'; fxc.shadowBlur = 12;
+      for (let i = 0; i < 18; i++) {
+        const ang = t * (4 + (i % 4)) + i * 0.35, rr = R * (0.25 + 0.75 * ((i * 7) % 11) / 11);
+        fxc.strokeStyle = `rgba(200,240,255,${0.6 * c})`; fxc.beginPath(); fxc.arc(cx, cy, rr, ang, ang + 1.3); fxc.stroke();
+      }
+      fxc.shadowBlur = 0;
     }
     function chidori(cx, cy, r) {
       const g = fxc.createRadialGradient(cx, cy, 0, cx, cy, r * 1.6);
@@ -309,7 +324,7 @@
     function save(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }
     function shot() {
       const c = document.createElement('canvas'); c.width = innerWidth; c.height = innerHeight;
-      compose(c.getContext('2d'), c.width, c.height); c.toBlob(b => save(b, 'rasengan.png'));
+      compose(c.getContext('2d'), c.width, c.height); c.toBlob(b => save(b, 'sealcast.png'));
     }
     let rec = null;
     function toggleRec() {
@@ -319,7 +334,7 @@
       const x = c.getContext('2d'), chunks = [], mt = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
       const r = rec = new MediaRecorder(c.captureStream(30), { mimeType: mt });
       r.ondataavailable = e => e.data.size && chunks.push(e.data);
-      r.onstop = () => { save(new Blob(chunks, { type: 'video/webm' }), 'rasengan.webm'); rec = null; $('bRec').textContent = '⏺'; };
+      r.onstop = () => { save(new Blob(chunks, { type: 'video/webm' }), 'sealcast.webm'); rec = null; $('bRec').textContent = '⏺'; };
       r.start(); $('bRec').textContent = '⏹';
       (function f() { if (!rec) return; compose(x, c.width, c.height); requestAnimationFrame(f); })();
     }
