@@ -15,7 +15,7 @@
 
 ---
 
-## ✨ Features
+##  Features
 
 - 🖐️ **Open-palm gesture** spawns a rasengan above your hand
 - 👐 **Two hands, two rasengans** — fully independent state per hand
@@ -27,7 +27,7 @@
 - ⚡ **Zero build** — one static HTML file, libraries loaded from CDN
 - 🔒 **Stays local** — no upload, no backend, the webcam never leaves your machine
 
-## 🧠 How It Works
+##  How It Works
 
 ```text
 webcam frame
@@ -49,7 +49,7 @@ composite layers: webcam → skeleton → vignette → rasengan(s)
 
 The palm-open test compares each fingertip's distance to the wrist against the corresponding PIP-knuckle's distance to the wrist. If three or more fingers extend past their knuckles, the palm is "open" for that frame.
 
-## 🛠️ Built With
+##  Built With
 
 - [**MediaPipe Hands**](https://google.github.io/mediapipe/solutions/hands.html) — on-device 21-landmark hand model
 - [**@mediapipe/camera_utils**](https://www.npmjs.com/package/@mediapipe/camera_utils) — wraps [`getUserMedia`](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia) and pipes frames to the model
